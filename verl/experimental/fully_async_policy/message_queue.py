@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import math
 from collections import deque
 from typing import Any
 
@@ -47,6 +48,8 @@ class MessageQueue:
         except (AttributeError, RecursionError):
             self.staleness_threshold = 3
 
+        self.max_stale_samples = self._compute_max_stale_samples()
+
         # Asyncio for message handling
         self.running = True
 
@@ -58,11 +61,27 @@ class MessageQueue:
         self.total_produced = 0
         self.total_consumed = 0
         self.dropped_samples = 0
+        self.dropped_stale_samples = 0
+        self.dropped_too_old_samples = 0
 
         print(
             f"[MessageQueue] initialized with max_queue_size={max_queue_size},"
             f"staleness_threshold={self.staleness_threshold}"
         )
+
+    def _compute_max_stale_samples(self) -> int | None:
+        try:
+            require_batches = int(self.config.async_training.require_batches)
+            ppo_mini_batch_size = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
+            trigger_parameter_sync_step = int(self.config.async_training.trigger_parameter_sync_step)
+        except (AttributeError, ValueError, TypeError):
+            return None
+        total_samples_per_sync = require_batches * ppo_mini_batch_size * trigger_parameter_sync_step
+        if total_samples_per_sync <= 0:
+            return 0
+        if self.staleness_threshold <= 0:
+            return 0
+        return int(math.floor(total_samples_per_sync * self.staleness_threshold))
 
     async def put_sample(self, sample: Any, param_version: int) -> bool:
         """
@@ -83,7 +102,7 @@ class MessageQueue:
                 self.dropped_samples += 1
                 is_drop = True
                 logger.warning("Queue full, dropped sample")
-            self.queue.append(sample)
+            self.queue.append((param_version, sample))
             self.total_produced += 1
 
             # Notify waiting consumers
@@ -111,7 +130,11 @@ class MessageQueue:
                 return None
 
             # Get one sample
-            data = self.queue.popleft()
+            entry = self.queue.popleft()
+            if isinstance(entry, tuple) and len(entry) == 2:
+                _, data = entry
+            else:
+                data = entry
             self.total_consumed += 1
             return data, len(self.queue)
 
@@ -120,7 +143,50 @@ class MessageQueue:
         async with self._lock:
             old_version = self.current_param_version
             self.current_param_version = version
-            print(f"Parameter version updated from {old_version} to {version}")
+            self.max_stale_samples = self._compute_max_stale_samples()
+            dropped_too_old = 0
+            dropped_excess_stale = 0
+            stale_version = version - 1
+            if stale_version >= 0 and self.queue:
+                normalized_entries = []
+                for entry in self.queue:
+                    if isinstance(entry, tuple) and len(entry) == 2:
+                        param_version, sample = entry
+                    else:
+                        param_version, sample = old_version, entry
+                    normalized_entries.append((param_version, sample))
+                stale_count = 0
+                for param_version, sample in normalized_entries:
+                    if sample is None:
+                        continue
+                    if param_version == stale_version:
+                        stale_count += 1
+                if self.max_stale_samples is None:
+                    stale_to_drop = 0
+                else:
+                    stale_to_drop = max(0, stale_count - self.max_stale_samples)
+                new_queue = deque(maxlen=self.max_queue_size)
+                for param_version, sample in normalized_entries:
+                    if sample is None:
+                        new_queue.append((param_version, sample))
+                        continue
+                    if param_version < stale_version:
+                        dropped_too_old += 1
+                        continue
+                    if param_version == stale_version and stale_to_drop > 0:
+                        stale_to_drop -= 1
+                        dropped_excess_stale += 1
+                        continue
+                    new_queue.append((param_version, sample))
+                self.queue = new_queue
+                self.dropped_too_old_samples += dropped_too_old
+                self.dropped_stale_samples += dropped_excess_stale
+            print(
+                f"Parameter version updated from {old_version} to {version}. "
+                f"dropped_too_old={dropped_too_old}, "
+                f"dropped_excess_stale={dropped_excess_stale}, "
+                f"queue_size={len(self.queue)}"
+            )
 
     async def get_queue_size(self) -> int:
         """Get current queue length"""
@@ -135,8 +201,11 @@ class MessageQueue:
                 "total_produced": self.total_produced,
                 "total_consumed": self.total_consumed,
                 "dropped_samples": self.dropped_samples,
+                "dropped_stale_samples": self.dropped_stale_samples,
+                "dropped_too_old_samples": self.dropped_too_old_samples,
                 "current_param_version": self.current_param_version,
                 "staleness_threshold": self.staleness_threshold,
+                "max_stale_samples": self.max_stale_samples,
                 "max_queue_size": self.max_queue_size,
             }
 
@@ -166,9 +235,16 @@ class MessageQueue:
 
             if sample_count > 0:
                 # Estimate size of a single sample (simplified estimation)
-                sample = list(self.queue)[0]
+                sample_entry = list(self.queue)[0]
+                if isinstance(sample_entry, tuple) and len(sample_entry) == 2:
+                    sample = sample_entry[1]
+                else:
+                    sample = sample_entry
                 try:
-                    sample_size = sys.getsizeof(sample)
+                    if isinstance(sample, (bytes, bytearray)):
+                        sample_size = len(sample)
+                    else:
+                        sample_size = sys.getsizeof(sample)
                     # Since we now store RolloutSample directly, estimate based on its components
                     if hasattr(sample, "original_batch_dict") and sample.original_batch_dict:
                         # Estimate batch data size
