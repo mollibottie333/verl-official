@@ -619,16 +619,21 @@ class DataParallelPPOActor(BasePPOActor):
                     # Skip if using bypass_mode loss (metrics already computed in pg_metrics)
                     rollout_log_prob = model_inputs.get("rollout_log_probs", None)
                     if loss_mode != "bypass_mode" and rollout_log_prob is not None:
-                        # Compute metrics using CURRENT policy π_θ vs π_rollout
-                        # Tracks evolving off-policy gap as π_θ updates during mini-batch training
-                        from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
-
-                        rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
-                            log_prob=log_prob,
-                            rollout_log_prob=rollout_log_prob,
-                            response_mask=response_mask,
+                        has_valid_response_tokens = bool(response_mask.any().item())
+                        micro_batch_metrics["rollout_corr/skipped_empty_response_mask"] = (
+                            0.0 if has_valid_response_tokens else 1.0
                         )
-                        micro_batch_metrics.update(rollout_corr_metrics)
+                        if has_valid_response_tokens:
+                            # Compute metrics using CURRENT policy π_θ vs π_rollout
+                            # Tracks evolving off-policy gap as π_θ updates during mini-batch training
+                            from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
+
+                            rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
+                                log_prob=log_prob,
+                                rollout_log_prob=rollout_log_prob,
+                                response_mask=response_mask,
+                            )
+                            micro_batch_metrics.update(rollout_corr_metrics)
 
                     policy_loss = pg_loss
                     if calculate_entropy and entropy is not None:
