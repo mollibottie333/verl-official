@@ -112,6 +112,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
 
     prompt_mask = batch.batch["attention_mask"][:, :-max_response_length].bool()
     response_mask = batch.batch["response_mask"].bool()
+    # Tracks sequences that are fully masked out (e.g. by rollout RS).
+    zero_response_mask = (response_mask.sum(dim=-1) == 0).bool()
 
     max_prompt_length = prompt_mask.size(-1)
 
@@ -145,6 +147,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     # Aborted samples and non-aborted response length statistics
     # response_length_non_aborted/*: statistics computed on non-aborted samples only
     aborted_ratio = torch.mean(aborted_mask.float()).detach().item()
+    zero_seq_frac = torch.mean(zero_response_mask.float()).detach().item()
 
     non_aborted_response_length = response_length[non_aborted_mask]
     if non_aborted_response_length.numel() > 0:
@@ -202,6 +205,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         # aborted ratio
         # Fraction of samples whose response length is zero
         "response/aborted_ratio": aborted_ratio,
+        # Fraction of samples whose response_mask has no valid tokens
+        "response/zero_seq_frac": zero_seq_frac,
         # prompt length
         "prompt_length/mean": torch.mean(prompt_length).detach().item(),
         "prompt_length/max": torch.max(prompt_length).detach().item(),

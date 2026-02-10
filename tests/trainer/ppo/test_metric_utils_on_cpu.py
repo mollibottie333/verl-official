@@ -273,10 +273,12 @@ class TestComputeDataMetrics(unittest.TestCase):
         self.assertIn("critic/vf_explained_var", metrics)
         self.assertIn("response_length/mean", metrics)
         self.assertIn("prompt_length/mean", metrics)
+        self.assertIn("response/zero_seq_frac", metrics)
 
         # Check some specific values
         self.assertAlmostEqual(metrics["critic/score/mean"], 5.0)  # Sum of token_level_scores
         self.assertAlmostEqual(metrics["critic/rewards/mean"], 2.5)  # Sum of token_level_rewards
+        self.assertAlmostEqual(metrics["response/zero_seq_frac"], 0.0)
 
     def test_compute_data_metrics_without_critic(self):
         """Test compute_data_metrics with critic disabled."""
@@ -290,6 +292,19 @@ class TestComputeDataMetrics(unittest.TestCase):
         self.assertIn("critic/score/mean", metrics)
         self.assertIn("critic/rewards/mean", metrics)
         self.assertIn("response_length/mean", metrics)
+        self.assertIn("response/zero_seq_frac", metrics)
+        self.assertAlmostEqual(metrics["response/zero_seq_frac"], 0.0)
+
+    def test_compute_data_metrics_zero_response_mask_fraction(self):
+        """Test response/zero_seq_frac reflects fully masked response rows."""
+        self.batch.batch["response_mask"] = torch.tensor(
+            [
+                [0, 0],
+                [1, 1],
+            ]
+        )
+        metrics = compute_data_metrics(self.batch, use_critic=True)
+        self.assertAlmostEqual(metrics["response/zero_seq_frac"], 0.5)
 
 
 class TestComputeTimingMetrics(unittest.TestCase):
