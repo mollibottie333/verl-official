@@ -184,21 +184,13 @@ class RLHFDataset(Dataset):
             tokenizer = self.tokenizer
             processor = self.processor
             prompt_key = self.prompt_key
-            image_key = self.image_key
-            video_key = self.video_key
 
             if processor is not None:
-                from verl.utils.dataset.vision_utils import process_image, process_video
+                from qwen_vl_utils import process_vision_info
 
                 def doc2len(doc) -> int:
                     try:
-                        # _build_messages mutates input doc (pop image/video and rewrites content),
-                        # so use a deep-copied doc for message construction.
-                        messages = self._build_messages(copy.deepcopy(doc))
-                        # Keep a separate deep copy for vision preprocessing to avoid reading
-                        # data that has been mutated by _build_messages.
-                        doc_images = copy.deepcopy(doc[image_key]) if image_key in doc else None
-                        doc_videos = copy.deepcopy(doc[video_key]) if video_key in doc else None
+                        messages = self._build_messages(doc)
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
                         if self.tool_schemas is not None:
@@ -207,35 +199,25 @@ class RLHFDataset(Dataset):
                         raw_prompt = self.processor.apply_chat_template(
                             messages, add_generation_prompt=True, tokenize=False, **apply_kwargs
                         )
-                        if doc_images:
-                            images = [
-                                process_image(image, image_patch_size=self.image_patch_size) for image in doc_images
-                            ]
-                        else:
-                            images = None
-
-                        if doc_videos:
-                            videos, video_metadata = zip(
-                                *[
-                                    process_video(
-                                        video, image_patch_size=self.image_patch_size, return_video_metadata=True
-                                    )
-                                    for video in doc_videos
-                                ],
-                                strict=True,
-                            )
-                            videos = list(videos)
-                            video_metadata = list(video_metadata)
-                            videos_kwargs = {"video_metadata": video_metadata, "do_sample_frames": False}
-                        else:
-                            videos = None
-                            videos_kwargs = {}
-
-                        return len(
-                            processor(text=[raw_prompt], images=images, videos=videos, videos_kwargs=videos_kwargs)[
-                                "input_ids"
-                            ][0]
+                        images, videos = process_vision_info(
+                            messages, image_patch_size=self.image_patch_size, return_video_metadata=True
                         )
+                        # Use same processor API as agent_loop (video_metadatas + do_sample_frames)
+                        # so doc2len matches agent-loop tokenization.
+                        if videos:
+                            videos, video_metadatas = zip(*videos, strict=True)
+                            videos, video_metadatas = list(videos), list(video_metadatas)
+                        else:
+                            video_metadatas = None
+                        tokenized = processor(
+                            text=[raw_prompt],
+                            images=images,
+                            videos=videos,
+                            video_metadatas=video_metadatas,
+                            return_tensors="pt",
+                            do_sample_frames=False,
+                        )
+                        return len(tokenized["input_ids"][0])
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()

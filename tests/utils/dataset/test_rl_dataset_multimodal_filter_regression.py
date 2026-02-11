@@ -1,4 +1,6 @@
 from io import BytesIO
+import sys
+import types
 
 import datasets
 from PIL import Image
@@ -12,7 +14,7 @@ class _DummyProcessor:
         assert tokenize is False
         return "dummy-prompt"
 
-    def __call__(self, text, images=None, videos=None, videos_kwargs=None):
+    def __call__(self, text, images=None, videos=None, videos_kwargs=None, **kwargs):
         length = 4
         if images:
             length += 2 * len(images)
@@ -37,20 +39,29 @@ def _build_test_dataset(max_prompt_length: int) -> RLHFDataset:
     return dataset
 
 
+def _install_fake_qwen_vl_utils(monkeypatch):
+    def _fake_process_vision_info(messages, image_patch_size=14, return_video_metadata=True):
+        images = []
+        videos = []
+        for message in messages:
+            content = message.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for chunk in content:
+                if not isinstance(chunk, dict):
+                    continue
+                if chunk.get("type") == "image":
+                    images.append(chunk.get("image"))
+                elif chunk.get("type") == "video":
+                    videos.append((chunk.get("video"), {"dummy": True}))
+        return images, videos
+
+    fake_module = types.SimpleNamespace(process_vision_info=_fake_process_vision_info)
+    monkeypatch.setitem(sys.modules, "qwen_vl_utils", fake_module)
+
+
 def test_multimodal_filter_uses_vision_length(monkeypatch):
-    import verl.utils.dataset.vision_utils as vision_utils
-
-    def _process_image_no_mutation_conflict(image, image_patch_size=14):
-        if isinstance(image, dict):
-            assert not ("bytes" in image and "image" in image)
-        return image
-
-    monkeypatch.setattr(vision_utils, "process_image", _process_image_no_mutation_conflict)
-    monkeypatch.setattr(
-        vision_utils,
-        "process_video",
-        lambda video, image_patch_size=14, return_video_metadata=True: (video, {"dummy": True}),
-    )
+    _install_fake_qwen_vl_utils(monkeypatch)
 
     dataset = _build_test_dataset(max_prompt_length=5)
     dataframe = datasets.Dataset.from_list(
@@ -75,19 +86,7 @@ def test_multimodal_filter_uses_vision_length(monkeypatch):
 
 
 def test_multimodal_filter_does_not_reuse_mutated_image_dict(monkeypatch):
-    import verl.utils.dataset.vision_utils as vision_utils
-
-    def _process_image_no_mutation_conflict(image, image_patch_size=14):
-        if isinstance(image, dict):
-            assert not ("bytes" in image and "image" in image)
-        return image
-
-    monkeypatch.setattr(vision_utils, "process_image", _process_image_no_mutation_conflict)
-    monkeypatch.setattr(
-        vision_utils,
-        "process_video",
-        lambda video, image_patch_size=14, return_video_metadata=True: (video, {"dummy": True}),
-    )
+    _install_fake_qwen_vl_utils(monkeypatch)
 
     image_bytes = BytesIO()
     Image.new("RGB", (8, 8), color="red").save(image_bytes, format="PNG")
