@@ -1,4 +1,7 @@
+from io import BytesIO
+
 import datasets
+from PIL import Image
 
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
@@ -37,7 +40,12 @@ def _build_test_dataset(max_prompt_length: int) -> RLHFDataset:
 def test_multimodal_filter_uses_vision_length(monkeypatch):
     import verl.utils.dataset.vision_utils as vision_utils
 
-    monkeypatch.setattr(vision_utils, "process_image", lambda image, image_patch_size=14: image)
+    def _process_image_no_mutation_conflict(image, image_patch_size=14):
+        if isinstance(image, dict):
+            assert not ("bytes" in image and "image" in image)
+        return image
+
+    monkeypatch.setattr(vision_utils, "process_image", _process_image_no_mutation_conflict)
     monkeypatch.setattr(
         vision_utils,
         "process_video",
@@ -64,3 +72,37 @@ def test_multimodal_filter_uses_vision_length(monkeypatch):
 
     assert len(filtered) == 1
     assert filtered[0]["prompt"][0]["content"] == "plain text"
+
+
+def test_multimodal_filter_does_not_reuse_mutated_image_dict(monkeypatch):
+    import verl.utils.dataset.vision_utils as vision_utils
+
+    def _process_image_no_mutation_conflict(image, image_patch_size=14):
+        if isinstance(image, dict):
+            assert not ("bytes" in image and "image" in image)
+        return image
+
+    monkeypatch.setattr(vision_utils, "process_image", _process_image_no_mutation_conflict)
+    monkeypatch.setattr(
+        vision_utils,
+        "process_video",
+        lambda video, image_patch_size=14, return_video_metadata=True: (video, {"dummy": True}),
+    )
+
+    image_bytes = BytesIO()
+    Image.new("RGB", (8, 8), color="red").save(image_bytes, format="PNG")
+
+    dataset = _build_test_dataset(max_prompt_length=10)
+    dataframe = datasets.Dataset.from_list(
+        [
+            {
+                "prompt": [{"role": "user", "content": "<image> describe this image"}],
+                "images": [{"bytes": image_bytes.getvalue()}],
+                "videos": [],
+            }
+        ]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert len(filtered) == 1

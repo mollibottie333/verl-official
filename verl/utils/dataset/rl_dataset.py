@@ -192,11 +192,13 @@ class RLHFDataset(Dataset):
 
                 def doc2len(doc) -> int:
                     try:
-                        # _build_messages pops image/video fields from doc, so cache them
-                        # beforehand to ensure multimodal token length is computed correctly.
-                        doc_images = doc[image_key] if image_key in doc else None
-                        doc_videos = doc[video_key] if video_key in doc else None
-                        messages = self._build_messages(doc)
+                        # _build_messages mutates input doc (pop image/video and rewrites content),
+                        # so use a deep-copied doc for message construction.
+                        messages = self._build_messages(copy.deepcopy(doc))
+                        # Keep a separate deep copy for vision preprocessing to avoid reading
+                        # data that has been mutated by _build_messages.
+                        doc_images = copy.deepcopy(doc[image_key]) if image_key in doc else None
+                        doc_videos = copy.deepcopy(doc[video_key]) if video_key in doc else None
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
                         if self.tool_schemas is not None:
