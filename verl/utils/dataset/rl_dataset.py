@@ -192,6 +192,10 @@ class RLHFDataset(Dataset):
 
                 def doc2len(doc) -> int:
                     try:
+                        # _build_messages pops image/video fields from doc, so cache them
+                        # beforehand to ensure multimodal token length is computed correctly.
+                        doc_images = doc[image_key] if image_key in doc else None
+                        doc_videos = doc[video_key] if video_key in doc else None
                         messages = self._build_messages(doc)
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
@@ -201,20 +205,20 @@ class RLHFDataset(Dataset):
                         raw_prompt = self.processor.apply_chat_template(
                             messages, add_generation_prompt=True, tokenize=False, **apply_kwargs
                         )
-                        if image_key in doc and doc[image_key]:
+                        if doc_images:
                             images = [
-                                process_image(image, image_patch_size=self.image_patch_size) for image in doc[image_key]
+                                process_image(image, image_patch_size=self.image_patch_size) for image in doc_images
                             ]
                         else:
                             images = None
 
-                        if video_key in doc and doc[video_key]:
+                        if doc_videos:
                             videos, video_metadata = zip(
                                 *[
                                     process_video(
                                         video, image_patch_size=self.image_patch_size, return_video_metadata=True
                                     )
-                                    for video in doc[video_key]
+                                    for video in doc_videos
                                 ],
                                 strict=True,
                             )
