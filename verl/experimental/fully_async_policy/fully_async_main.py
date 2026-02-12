@@ -139,6 +139,14 @@ class FullyAsyncTaskRunner:
         self.components = {}
         self.shutdown_event = threading.Event()
 
+    def _is_eval_only_mode(self) -> bool:
+        config = self.components.get("config")
+        if config is None:
+            return False
+        trainer_val_only = bool(config.trainer.get("val_only", False))
+        async_only_eval = bool(config.async_training.get("only_eval", False))
+        return trainer_val_only or async_only_eval
+
     def run(self, config):
         print("[ASYNC MAIN] Starting fully async PPO training...")
         self._initialize_components(config)
@@ -204,7 +212,8 @@ class FullyAsyncTaskRunner:
         ray.get(self.components["trainer"].set_parameter_synchronizer.remote(param_synchronizer))
 
         # load checkpoint and sync parameter before doing anything
-        val_before_train = config.trainer.get("val_before_train", True)
+        eval_only = self._is_eval_only_mode()
+        val_before_train = bool(config.trainer.get("val_before_train", True)) or eval_only
         # param_version resume from ckpt or default 0
         param_version = ray.get(self.components["trainer"].load_checkpoint.remote())
         ray.get(self.components["rollouter"].load_checkpoint.remote())
@@ -218,6 +227,8 @@ class FullyAsyncTaskRunner:
         ray.get(param_synchronizer.wait_last_valid.remote())
 
         self.components["param_synchronizer"] = param_synchronizer
+        if eval_only:
+            print("[ASYNC MAIN] Eval-only mode enabled. Initial validation has been triggered.")
         print("[ASYNC MAIN] All components initialized successfully")
 
     def _create_rollouter(self, config) -> None:
@@ -261,11 +272,15 @@ class FullyAsyncTaskRunner:
     def _run_training_loop(self):
         self.running = True
 
-        print("[ASYNC MAIN] Starting Rollouter and Trainer...")
-        rollouter_future = self.components["rollouter"].fit.remote()
-        trainer_future = self.components["trainer"].fit.remote()
-
-        futures = [rollouter_future, trainer_future]
+        eval_only = self._is_eval_only_mode()
+        if eval_only:
+            print("[ASYNC MAIN] Starting Trainer only (eval-only mode)...")
+            futures = [self.components["trainer"].fit.remote()]
+        else:
+            print("[ASYNC MAIN] Starting Rollouter and Trainer...")
+            rollouter_future = self.components["rollouter"].fit.remote()
+            trainer_future = self.components["trainer"].fit.remote()
+            futures = [rollouter_future, trainer_future]
 
         try:
             while futures:
