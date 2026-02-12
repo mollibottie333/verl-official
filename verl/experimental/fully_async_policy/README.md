@@ -109,6 +109,7 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 | `async_training.checkpoint_engine.overlap_broadcast_and_consume` | When use checkpoint_engine, whether to overlap broadcast and load_weights, default `False`|
 | `async_training.checkpoint_engine.device_buffer_size_M` | When use checkpoint_engine, the user-specific bucket size (MB), default `4096`|
 | `async_training.use_trainer_do_validate` | Whether use trainer node to do validate process, default `False`|
+| `async_training.only_eval` | Run validation generation only and skip training loop, default `False`|
 
 **Further Explanation:**
 
@@ -343,6 +344,26 @@ python -m recipe.fully_async_policy.fully_async_main \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.partial_rollout="${partial_rollout}"
 ```
+
+### Eval-only Multi-turn Inference
+
+To run multi-turn inference/evaluation only in `fully_async_policy` (without actor update), use:
+
+```yaml
+trainer:
+  val_only: True
+async_training:
+  only_eval: True
+actor_rollout_ref:
+  rollout:
+    multi_turn:
+      enable: True
+```
+
+This mode will:
+- perform one parameter sync + validation generation pass,
+- skip rollouter sample production loop and trainer update loop,
+- preserve the multi-turn agent-loop behavior in validation generation.
 
 ## Experiments
 

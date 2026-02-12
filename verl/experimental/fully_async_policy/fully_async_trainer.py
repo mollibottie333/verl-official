@@ -310,6 +310,14 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
 
         # get validate data before training
         self._log_validation_data()
+        eval_only = bool(self.config.trainer.get("val_only", False)) or bool(
+            self.config.async_training.get("only_eval", False)
+        )
+        if eval_only:
+            print("[FullyAsyncTrainer] Eval-only mode enabled. Skip training loop.")
+            if self.progress_bar is not None:
+                self.progress_bar.close()
+            return
 
         # Use queue mode, no need for traditional dataloader iterator
         # Initialize to get the first batch of data

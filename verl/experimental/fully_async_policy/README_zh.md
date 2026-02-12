@@ -86,6 +86,7 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 | `async_training.checkpoint_engine.overlap_broadcast_and_consume` | 启动checkpoint_engine时，是否在参数同步时在broadcast和加载之间使用流水，默认值False|
 | `async_training.checkpoint_engine.device_buffer_size_M` | 启动checkpoint_engine时，组装的bucket的大小(MB)，默认为4096 |
 | `async_training.use_trainer_do_validate` | 是否使用Trainer的do_validate方法进行validation，默认值False |
+| `async_training.only_eval` | 是否仅执行验证推理并跳过训练循环，默认值False |
 
 **进一步的解释：**
 
@@ -280,6 +281,26 @@ python -m recipe.fully_async_policy.fully_async_main \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.partial_rollout="${partial_rollout}"
 ```
+
+### 仅评估（Only Eval）多轮推理
+
+如果你只想在 `fully_async_policy` 中执行多轮推理/验证（不进行训练更新），可设置：
+
+```yaml
+trainer:
+  val_only: True
+async_training:
+  only_eval: True
+actor_rollout_ref:
+  rollout:
+    multi_turn:
+      enable: True
+```
+
+该模式会：
+- 执行一次参数同步和验证推理；
+- 跳过 Rollouter 的样本生产循环与 Trainer 的训练更新循环；
+- 保留多轮 Agent Loop 的推理行为。
 
 ## 实验
 
