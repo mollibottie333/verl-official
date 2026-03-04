@@ -59,11 +59,7 @@ Is the student's answer correct?  Reply with exactly one word: **Yes** or **No**
 
 @lru_cache(maxsize=1)
 def _get_async_client():
-    """Lazily create and cache an AsyncOpenAI client (compatible with vLLM / sglang / TGI).
-
-    The httpx pool is sized to match the concurrency semaphore so that
-    all permitted requests can have a live connection simultaneously.
-    """
+    """Lazily create and cache an AsyncOpenAI client (compatible with vLLM / sglang / TGI)."""
     from openai import AsyncOpenAI
 
     base_url = os.environ.get("LLM_JUDGE_BASE_URL", "http://10.244.124.91:8000/v1")
@@ -78,13 +74,6 @@ def _get_async_client():
         api_key=api_key,
         timeout=httpx.Timeout(_REQUEST_TIMEOUT, connect=30.0),
         max_retries=0,
-        http_client=httpx.AsyncClient(
-            limits=httpx.Limits(
-                max_connections=_MAX_CONCURRENT + 10,
-                max_keepalive_connections=_MAX_CONCURRENT,
-            ),
-            timeout=httpx.Timeout(_REQUEST_TIMEOUT, connect=30.0),
-        ),
     )
 
 
