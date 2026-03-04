@@ -2,9 +2,12 @@
 
 Environment variables
 ---------------------
-LLM_JUDGE_BASE_URL : str   – API base URL (e.g. "http://localhost:8000/v1").
-LLM_JUDGE_API_KEY  : str   – API key, defaults to "EMPTY".
-LLM_JUDGE_MODEL    : str   – Model name served at the endpoint, defaults to "default".
+LLM_JUDGE_BASE_URL        : str – API base URL (e.g. "http://localhost:8000/v1").
+LLM_JUDGE_API_KEY         : str – API key, defaults to "EMPTY".
+LLM_JUDGE_MODEL           : str – Model name served at the endpoint, defaults to "default".
+LLM_JUDGE_MAX_CONCURRENT  : int – Max in-flight requests to avoid overloading the
+                                   sglang/vllm server.  Defaults to 64.
+LLM_JUDGE_TIMEOUT         : int – Per-request timeout in seconds.  Defaults to 300.
 """
 
 import asyncio
@@ -14,7 +17,22 @@ import os
 from functools import lru_cache
 from typing import Optional
 
+import httpx
+
 logger = logging.getLogger(__name__)
+
+_MAX_CONCURRENT = int(os.environ.get("LLM_JUDGE_MAX_CONCURRENT", "64"))
+_REQUEST_TIMEOUT = int(os.environ.get("LLM_JUDGE_TIMEOUT", "300"))
+_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Return a per-event-loop semaphore that caps concurrent LLM requests."""
+    global _SEMAPHORE
+    if _SEMAPHORE is None:
+        _SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT)
+    return _SEMAPHORE
+
 
 JUDGE_PROMPT = """\
 You are a precise math answer equivalence checker.
@@ -41,7 +59,11 @@ Is the student's answer correct?  Reply with exactly one word: **Yes** or **No**
 
 @lru_cache(maxsize=1)
 def _get_async_client():
-    """Lazily create and cache an AsyncOpenAI client (compatible with vLLM / sglang / TGI)."""
+    """Lazily create and cache an AsyncOpenAI client (compatible with vLLM / sglang / TGI).
+
+    The httpx pool is sized to match the concurrency semaphore so that
+    all permitted requests can have a live connection simultaneously.
+    """
     from openai import AsyncOpenAI
 
     base_url = os.environ.get("LLM_JUDGE_BASE_URL", "http://10.244.124.91:8000/v1")
@@ -51,7 +73,19 @@ def _get_async_client():
             "LLM_JUDGE_BASE_URL must be set "
             "(e.g. 'http://localhost:8000/v1')"
         )
-    return AsyncOpenAI(base_url=base_url, api_key=api_key)
+    return AsyncOpenAI(
+        base_url=base_url,
+        api_key=api_key,
+        timeout=httpx.Timeout(_REQUEST_TIMEOUT, connect=30.0),
+        max_retries=0,
+        http_client=httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_connections=_MAX_CONCURRENT + 10,
+                max_keepalive_connections=_MAX_CONCURRENT,
+            ),
+            timeout=httpx.Timeout(_REQUEST_TIMEOUT, connect=30.0),
+        ),
+    )
 
 
 def _get_model() -> str:
@@ -103,6 +137,11 @@ async def llm_judge(
         following the convention used elsewhere in the codebase (e.g. genRM).
     max_retries : int
 
+    The concurrency of in-flight requests is capped by an asyncio.Semaphore
+    (controlled via ``LLM_JUDGE_MAX_CONCURRENT``, default 64) so that the
+    sglang / vLLM server is not overwhelmed when a large batch is scored
+    concurrently.  Retries use exponential backoff.
+
     Gracefully returns 0.0 when the judge endpoint is unavailable.
     """
     try:
@@ -122,20 +161,22 @@ async def llm_judge(
     )
     messages = _build_messages(prompt, images)
 
+    sem = _get_semaphore()
     for attempt in range(max_retries):
         try:
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=1024,
-                temperature=0.7,
-                top_p=0.8,
-                presence_penalty=1.5,
-                extra_body={
-                    "top_k": 20,
-                    "chat_template_kwargs": {"enable_thinking": False},
-                },
-            )
+            async with sem:
+                resp = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=1024,
+                    temperature=0.7,
+                    top_p=0.8,
+                    presence_penalty=1.5,
+                    extra_body={
+                        "top_k": 20,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    },
+                )
             reply = resp.choices[0].message.content.strip().lower()
             if "yes" in reply and "no" in reply:
                 logger.warning("Ambiguous LLM judge reply: %s", reply)
@@ -150,6 +191,9 @@ async def llm_judge(
             logger.warning(
                 "LLM judge attempt %d/%d failed: %s", attempt + 1, max_retries, e
             )
+            if attempt < max_retries - 1:
+                backoff = min(2 ** attempt, 30)
+                await asyncio.sleep(backoff)
 
     logger.error("LLM judge exhausted %d retries – returning 0.0", max_retries)
     return 0.0
